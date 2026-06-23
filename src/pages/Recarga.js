@@ -1,118 +1,247 @@
-import React, { useState } from 'react';
-import { 
-  View, 
-  Text, 
-  StyleSheet, 
-  TouchableOpacity, 
-  SafeAreaView, 
+import React, { useState, useEffect } from "react";
+import {
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  SafeAreaView,
   Alert,
   Modal,
-  ActivityIndicator // <-- NOVO: Para mostrar a bolinha girando no botão
-} from 'react-native';
-import { useNavigation } from '@react-navigation/native';
-import { Feather, MaterialIcons } from '@expo/vector-icons'; 
+  ActivityIndicator,
+  Clipboard,
+} from "react-native";
+import { useNavigation } from "@react-navigation/native";
+import { Feather, MaterialIcons } from "@expo/vector-icons";
+
+// IMPORTAÇÃO DA BIBLIOTECA DE NOTIFICAÇÕES
+import * as Notifications from "expo-notifications";
 
 // IMPORTAÇÕES DO FIREBASE
-import { auth, db } from '../firebaseConfig';
-import { doc, updateDoc, increment, collection, addDoc } from 'firebase/firestore';
+import { auth, db } from "../firebaseConfig";
+import {
+  doc,
+  updateDoc,
+  increment,
+  collection,
+  addDoc,
+  getDoc,
+} from "firebase/firestore";
+
+// CONFIGURAÇÃO ESSENCIAL: Faz a notificação cair do topo (Heads-up) mesmo com o app aberto!
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true, // Mostra o banner visual vindo de cima
+    shouldPlaySound: true, // Toca o som de notificação padrão do celular
+    shouldSetBadge: false,
+  }),
+});
 
 export default function Recarga() {
   const navigation = useNavigation();
 
-  // Cores do seu layout
-  const primaryDarkBlue = '#0F3271';
-  const buttonBlue = '#3B82F6';
-  const VALOR_PASSAGEM = 4.65;
+  // Cores do layout padrão
+  const primaryDarkBlue = "#0F3271";
+  const buttonBlue = "#3B82F6";
+  const pixGreen = "#32BCAD";
 
-  // Estados
+  // Estados da tela
+  const [valorPassagem, setValorPassagem] = useState(4.65); // Inicia com o valor da inteira
   const [quantidade, setQuantidade] = useState(0);
-  const [formaPagamento, setFormaPagamento] = useState('');
+  const [formaPagamento, setFormaPagamento] = useState("");
   const [modalCartaoVisivel, setModalCartaoVisivel] = useState(false);
-  const [isCarregando, setIsCarregando] = useState(false); // <-- NOVO: Controla o estado de carregamento
+  const [modalPixVisivel, setModalPixVisivel] = useState(false);
+  const [isCarregando, setIsCarregando] = useState(false);
 
-  // Funções de controle
+  // 1. VERIFICAR SE É ESTUDANTE PARA APLICAR A MEIA-PASSAGEM
+  useEffect(() => {
+    async function verificarEstudante() {
+      if (auth.currentUser) {
+        try {
+          const userRef = doc(db, "usuarios", auth.currentUser.uid);
+          const userSnap = await getDoc(userRef);
+
+          if (userSnap.exists()) {
+            const dados = userSnap.data();
+            // Se tiver o benefício ativo, o valor cai para 2.35
+            if (dados.isEstudante === true) {
+              setValorPassagem(2.35);
+            }
+          }
+        } catch (error) {
+          console.log("Erro ao buscar dados de estudante:", error);
+        }
+      }
+    }
+    verificarEstudante();
+  }, []);
+
+  // 2. PEDIR PERMISSÃO AO USUÁRIO ASSIM QUE ENTRAR NA TELA (CORRIGIDO)
+  useEffect(() => {
+    async function solicitarPermissaoNotificacao() {
+      const { status } = await Notifications.requestPermissionsAsync();
+      if (status !== "granted") {
+        console.log("Permissão para notificações locais não foi concedida.");
+      }
+    }
+    solicitarPermissaoNotificacao(); // Corrigido o erro de digitação aqui
+  }, []);
+
+  // Funções de controle do contador
   const incrementar = () => setQuantidade(quantidade + 1);
   const decrementar = () => {
     if (quantidade > 0) setQuantidade(quantidade - 1);
   };
 
-  // Cálculos dinâmicos
-  const total = quantidade * VALOR_PASSAGEM;
-  const totalFormatado = total.toFixed(2).replace('.', ',');
-  const isCartaoSelecionado = formaPagamento.startsWith('Cartão');
+  // Cálculos dinâmicos de valores usando o estado 'valorPassagem'
+  const total = quantidade * valorPassagem;
+  const totalFormatado = total.toFixed(2).replace(".", ",");
+  const isCartaoSelecionado = formaPagamento.startsWith("Cartão");
 
-  // FUNÇÃO DE RECARGA COM FIREBASE
-  const handleRecarregar = async () => {
-    if (quantidade === 0) {
-      Alert.alert('Atenção', 'Adicione pelo menos 1 passagem!');
-      return;
+  // FUNÇÃO EXCLUSIVA PARA DISPARAR O BANNER DO TOPO (CORRIGIDO)
+  const dispararNotificacaoSucesso = async () => {
+    try {
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: "Recarga Confirmada! 🚌✨",
+          body: `Seu pagamento via ${formaPagamento} de R$ ${totalFormatado} foi validado. Suas passagens já estão disponíveis!`,
+        },
+        trigger: { seconds: 1 }, // Corrigido: 'null' quebrava nas versões novas do Expo. 'seconds: 1' é seguro.
+      });
+    } catch (error) {
+      console.log("Erro ao disparar notificação:", error);
     }
-    if (formaPagamento === '') {
-      Alert.alert('Atenção', 'Selecione uma forma de pagamento!');
-      return;
-    }
+  };
 
-    setIsCarregando(true); // Desativa o botão e mostra o carregamento
+  // FUNÇÃO DE RECARGA NO BANCO DE DADOS
+  const executarRecargaNoFirebase = async () => {
+    setIsCarregando(true);
 
     try {
-      const userUid = auth.currentUser.uid; // Pega o ID do usuário logado
+      const userUid = auth.currentUser.uid;
       const userRef = doc(db, "usuarios", userUid);
 
-      // Passo 1: Atualiza o saldo no perfil do usuário
-      // O 'increment' do Firebase é inteligente, ele soma a quantidade nova ao saldo atual
-      // Passo 1: Atualiza o saldo no perfil do usuário
+      // Atualização atômica do saldo
       await updateDoc(userRef, {
         saldoPassagens: increment(quantidade),
-        passagensTotalHistorico: increment(quantidade) // <-- ADICIONE ESTA LINHA!
+        passagensTotalHistorico: increment(quantidade),
       });
 
-      // Passo 2: Salva os detalhes da compra na subcoleção "extrato"
+      // Registro histórico na subcoleção "extrato"
       await addDoc(collection(db, "usuarios", userUid, "extrato"), {
         tipo: "Recarga",
         quantidade: quantidade,
-        valorTotal: total, // Salva o número puro para facilitar contas futuras
-        valorTotalFormatado: totalFormatado, 
+        valorTotal: total,
+        valorTotalFormatado: totalFormatado,
         pagamento: formaPagamento,
-        data: new Date() // O Firebase vai salvar como um Timestamp (perfeito para ordenar do mais novo pro mais velho depois)
+        data: new Date(),
+        tipoPassagemAplicada: valorPassagem === 2.35 ? "Meia" : "Inteira", // Registra no extrato se foi meia ou inteira!
       });
 
-      // Se deu tudo certo, avisa o usuário e volta pro menu
-      Alert.alert(
-        'Sucesso!', 
-        `Recarga de R$ ${totalFormatado} feita com sucesso!`,
-        [
-          { text: 'OK', onPress: () => navigation.goBack() }
-        ]
-      );
+      // Fecha o modal do PIX se estiver aberto
+      setModalPixVisivel(false);
 
+      // 1. Dispara a notificação local para cair do topo instantaneamente
+      await dispararNotificacaoSucesso();
+
+      // 2. Retorna para a tela anterior direto, sem travar a interface do usuário
+      navigation.goBack();
     } catch (error) {
-      console.error("Erro ao recarregar:", error);
-      Alert.alert("Erro", "Não foi possível concluir a recarga. Verifique sua conexão e tente novamente.");
+      console.error("Erro crítico ao processar recarga:", error);
+      Alert.alert(
+        "Falha na Operação",
+        "Não foi possível concluir a recarga. Verifique sua conexão e tente novamente.",
+      );
     } finally {
-      setIsCarregando(false); // Reativa o botão indepedente de sucesso ou erro
+      setIsCarregando(false);
+    }
+  };
+
+  // FUNÇÃO DO BOTÃO "CONFIRMAR PAGAMENTO"
+  const handleBotaoRecarregar = async () => {
+    if (quantidade === 0) {
+      Alert.alert("Atenção", "Adicione pelo menos 1 passagem para recarregar!");
+      return;
+    }
+    if (formaPagamento === "") {
+      Alert.alert("Atenção", "Por favor, selecione uma forma de pagamento!");
+      return;
+    }
+    if (!auth.currentUser) {
+      Alert.alert("Erro", "Sessão expirada. Faça login novamente.");
+      return;
+    }
+
+    // SE FOR PIX, ABRE O MODAL DO PIX ANTES DE SALVAR
+    if (formaPagamento === "PIX") {
+      setModalPixVisivel(true);
+      return;
+    }
+
+    // SE FOR CARTÃO, VALIDA NO BANCO ANTES DE SALVAR
+    setIsCarregando(true);
+    try {
+      const userRef = doc(db, "usuarios", auth.currentUser.uid);
+      const userSnap = await getDoc(userRef);
+
+      if (userSnap.exists()) {
+        const userData = userSnap.data();
+        if (!userData.cartaoCadastrado) {
+          Alert.alert(
+            "Cartão Não Encontrado",
+            "Cadastre um cartão válido na aba de dados antes de realizar uma recarga.",
+          );
+          setIsCarregando(false);
+          return;
+        }
+      }
+
+      // Se passou na validação do cartão cadastrado, salva no Firebase e gera notificação
+      await executarRecargaNoFirebase();
+    } catch (error) {
+      console.error(error);
+      setIsCarregando(false);
     }
   };
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.container}>
-        
-        {/* Botão de voltar */}
+        {/* Botão Superior de Voltar */}
         <View style={styles.backButtonContainer}>
-          <TouchableOpacity onPress={() => navigation.goBack()} disabled={isCarregando}>
+          <TouchableOpacity
+            onPress={() => navigation.goBack()}
+            disabled={isCarregando}
+          >
             <Feather name="arrow-left" size={32} color="black" />
           </TouchableOpacity>
         </View>
 
-        {/* Títulos e Total */}
+        {/* Display do Valor Acumulado */}
         <Text style={[styles.title, { color: primaryDarkBlue }]}>Recarga</Text>
+
         <Text style={[styles.totalText, { color: primaryDarkBlue }]}>
           R$ {totalFormatado}
         </Text>
 
-        {/* Controles de Quantidade */}
+        {/* Adicionado um texto para mostrar qual tarifa está sendo aplicada */}
+        <Text
+          style={[
+            styles.tipoTarifaText,
+            { color: valorPassagem === 2.35 ? "#43A047" : "#757575" },
+          ]}
+        >
+          {valorPassagem === 2.35
+            ? "✨ Tarifa de Meia-Passagem (Estudante)"
+            : "Tarifa Inteira (Vale Transporte)"}
+        </Text>
+
+        {/* Componente Seletor de Quantidades (Stepper) */}
         <View style={styles.counterRow}>
-          <TouchableOpacity style={styles.circleButton} onPress={decrementar} disabled={isCarregando}>
+          <TouchableOpacity
+            style={styles.circleButton}
+            onPress={decrementar}
+            disabled={isCarregando}
+          >
             <Feather name="minus" size={32} color="black" />
           </TouchableOpacity>
 
@@ -120,7 +249,11 @@ export default function Recarga() {
             <Text style={styles.quantityText}>{quantidade}</Text>
           </View>
 
-          <TouchableOpacity style={styles.circleButton} onPress={incrementar} disabled={isCarregando}>
+          <TouchableOpacity
+            style={styles.circleButton}
+            onPress={incrementar}
+            disabled={isCarregando}
+          >
             <Feather name="plus" size={32} color="black" />
           </TouchableOpacity>
         </View>
@@ -129,226 +262,331 @@ export default function Recarga() {
           Forma de Pagamento
         </Text>
 
-        {/* OPÇÃO: CARTÃO */}
-        <TouchableOpacity 
+        {/* Opção Conclusiva: Cartão */}
+        <TouchableOpacity
           activeOpacity={0.7}
           onPress={() => setModalCartaoVisivel(true)}
           disabled={isCarregando}
           style={[
             styles.paymentOption,
-            isCartaoSelecionado && { backgroundColor: 'rgba(59, 130, 246, 0.1)', borderColor: buttonBlue }
+            isCartaoSelecionado && {
+              backgroundColor: "rgba(59, 130, 246, 0.1)",
+              borderColor: buttonBlue,
+            },
           ]}
         >
           <MaterialIcons name="credit-card" size={32} color="black" />
           <Text style={[styles.paymentText, { color: primaryDarkBlue }]}>
-            {isCartaoSelecionado ? formaPagamento : 'Cartão'}
+            {isCartaoSelecionado ? formaPagamento : "Cartão"}
           </Text>
           <View style={styles.spacer} />
-          {isCartaoSelecionado && <MaterialIcons name="check-circle" size={24} color={buttonBlue} />}
+          {isCartaoSelecionado && (
+            <MaterialIcons name="check-circle" size={24} color={buttonBlue} />
+          )}
         </TouchableOpacity>
 
-        {/* OPÇÃO: PIX */}
-        <TouchableOpacity 
+        {/* Opção Conclusiva: PIX */}
+        <TouchableOpacity
           activeOpacity={0.7}
-          onPress={() => setFormaPagamento('PIX')}
+          onPress={() => setFormaPagamento("PIX")}
           disabled={isCarregando}
           style={[
             styles.paymentOption,
-            formaPagamento === 'PIX' && { backgroundColor: 'rgba(59, 130, 246, 0.1)', borderColor: buttonBlue }
+            formaPagamento === "PIX" && {
+              backgroundColor: "rgba(59, 130, 246, 0.1)",
+              borderColor: buttonBlue,
+            },
           ]}
         >
-          <MaterialIcons name="pix" size={32} color="#32BCAD" />
-          <Text style={[styles.paymentText, { color: primaryDarkBlue }]}>PIX</Text>
+          <MaterialIcons name="pix" size={32} color={pixGreen} />
+          <Text style={[styles.paymentText, { color: primaryDarkBlue }]}>
+            PIX
+          </Text>
           <View style={styles.spacer} />
-          {formaPagamento === 'PIX' && <MaterialIcons name="check-circle" size={24} color={buttonBlue} />}
+          {formaPagamento === "PIX" && (
+            <MaterialIcons name="check-circle" size={24} color={buttonBlue} />
+          )}
         </TouchableOpacity>
 
         <View style={styles.spacer} />
 
-        {/* BOTÃO RECARREGAR */}
-        <TouchableOpacity 
+        {/* Gatilho Inicial da Ação */}
+        <TouchableOpacity
           style={[
-            styles.rechargeButton, 
+            styles.rechargeButton,
             { backgroundColor: buttonBlue },
-            isCarregando && { opacity: 0.7 } // Deixa o botão mais clarinho se estiver carregando
-          ]} 
-          onPress={handleRecarregar}
-          disabled={isCarregando} // Impede cliques duplos
+            { opacity: isCarregando ? 0.7 : 1 },
+          ]}
+          onPress={handleBotaoRecarregar}
+          disabled={isCarregando}
         >
           {isCarregando ? (
             <ActivityIndicator color="#FFF" size="large" />
           ) : (
-            <Text style={styles.rechargeButtonText}>Recarregar</Text>
+            <Text style={styles.rechargeButtonText}>Confirmar Pagamento</Text>
           )}
         </TouchableOpacity>
-
       </View>
 
-      {/* === MODAL DE ESCOLHA DE CARTÃO === */}
-      <Modal visible={modalCartaoVisivel} transparent={true} animationType="fade">
+      {/* MODAL 1: Escolha do Cartão (Crédito/Débito) */}
+      <Modal
+        visible={modalCartaoVisivel}
+        transparent={true}
+        animationType="fade"
+      >
         <View style={styles.modalBackground}>
           <View style={styles.modalContainer}>
-            <Text style={[styles.modalTitle, { color: primaryDarkBlue }]}>Escolha a função</Text>
-            
-            <TouchableOpacity 
-              style={[styles.modalButtonFilled, { backgroundColor: buttonBlue }]} 
-              onPress={() => { setFormaPagamento('Cartão (Crédito)'); setModalCartaoVisivel(false); }}
+            <Text style={[styles.modalTitle, { color: primaryDarkBlue }]}>
+              Escolha a função do cartão
+            </Text>
+
+            <TouchableOpacity
+              style={[
+                styles.modalButtonFilled,
+                { backgroundColor: buttonBlue },
+              ]}
+              onPress={() => {
+                setFormaPagamento("Cartão (Crédito)");
+                setModalCartaoVisivel(false);
+              }}
             >
               <Text style={styles.modalButtonFilledText}>Crédito</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity 
-              style={[styles.modalButtonOutlined, { borderColor: buttonBlue }]} 
-              onPress={() => { setFormaPagamento('Cartão (Débito)'); setModalCartaoVisivel(false); }}
+            <TouchableOpacity
+              style={[styles.modalButtonOutlined, { borderColor: buttonBlue }]}
+              onPress={() => {
+                setFormaPagamento("Cartão (Débito)");
+                setModalCartaoVisivel(false);
+              }}
             >
-              <Text style={[styles.modalButtonOutlinedText, { color: buttonBlue }]}>Débito</Text>
+              <Text
+                style={[styles.modalButtonOutlinedText, { color: buttonBlue }]}
+              >
+                Débito
+              </Text>
             </TouchableOpacity>
 
-            <TouchableOpacity onPress={() => setModalCartaoVisivel(false)} style={styles.modalCancelButton}>
+            <TouchableOpacity
+              onPress={() => setModalCartaoVisivel(false)}
+              style={styles.modalCancelButton}
+            >
               <Text style={styles.modalCancelText}>Cancelar</Text>
             </TouchableOpacity>
           </View>
         </View>
       </Modal>
 
+      {/* MODAL 2: TELA DO PIX PARA A BANCA */}
+      <Modal visible={modalPixVisivel} transparent={true} animationType="slide">
+        <View style={styles.modalBackground}>
+          <View style={styles.modalContainer}>
+            <MaterialIcons
+              name="pix"
+              size={50}
+              color={pixGreen}
+              style={{ alignSelf: "center", marginBottom: 16 }}
+            />
+
+            <Text style={[styles.modalTitle, { color: primaryDarkBlue }]}>
+              Pagamento via PIX
+            </Text>
+
+            <Text
+              style={{
+                textAlign: "center",
+                fontSize: 16,
+                marginBottom: 8,
+                color: "#555",
+              }}
+            >
+              Valor a pagar:
+            </Text>
+            <Text
+              style={{
+                textAlign: "center",
+                fontSize: 32,
+                fontWeight: "bold",
+                color: primaryDarkBlue,
+                marginBottom: 24,
+              }}
+            >
+              R$ {totalFormatado}
+            </Text>
+
+            <View style={styles.pixCodeContainer}>
+              <Text
+                style={styles.pixCodeText}
+                numberOfLines={1}
+                ellipsizeMode="middle"
+              >
+                00020126580014br.gov.bcb.pix0136123e4567-e89b-12d3-a456-426655440000...
+              </Text>
+            </View>
+
+            {/* BOTÃO COPIAR CÓDIGO PIX (Dispara a recarga + notificação) */}
+            <TouchableOpacity
+              style={[
+                styles.modalButtonFilled,
+                {
+                  backgroundColor: pixGreen,
+                  flexDirection: "row",
+                  justifyContent: "center",
+                },
+              ]}
+              onPress={async () => {
+                // Simula a cópia real para a área de transferência
+                Clipboard.setString(
+                  "00020126580014br.gov.bcb.pix0136123e4567-e89b-12d3-a456-426655440000",
+                );
+                // Executa a operação que atualiza o banco e joga a notificação na tela
+                await executarRecargaNoFirebase();
+              }}
+              disabled={isCarregando}
+            >
+              {isCarregando ? (
+                <ActivityIndicator color="#FFF" />
+              ) : (
+                <>
+                  <Feather
+                    name="copy"
+                    size={20}
+                    color="#FFF"
+                    style={{ marginRight: 8 }}
+                  />
+                  <Text style={styles.modalButtonFilledText}>
+                    Copiar Código PIX
+                  </Text>
+                </>
+              )}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              onPress={() => setModalPixVisivel(false)}
+              style={styles.modalCancelButton}
+              disabled={isCarregando}
+            >
+              <Text style={styles.modalCancelText}>Cancelar Operação</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
 
-// Estilos (mantidos 100% como o seu original)
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: '#F4F5F7',
-  },
-  container: {
-    flex: 1,
-    padding: 24,
-  },
-  backButtonContainer: {
-    alignItems: 'flex-start',
-    marginBottom: 16,
-  },
+  safeArea: { flex: 1, backgroundColor: "#F4F5F7" },
+  container: { flex: 1, padding: 24 },
+  backButtonContainer: { alignItems: "flex-start", marginBottom: 16 },
   title: {
     fontSize: 24,
-    fontWeight: 'bold',
-    textAlign: 'center',
-    marginBottom: 24,
+    fontWeight: "bold",
+    textAlign: "center",
+    marginBottom: 16,
   },
   totalText: {
     fontSize: 48,
-    fontWeight: 'bold',
-    textAlign: 'center',
+    fontWeight: "bold",
+    textAlign: "center",
+    marginBottom: 8,
+  },
+  tipoTarifaText: {
+    fontSize: 14,
+    fontWeight: "600",
+    textAlign: "center",
     marginBottom: 40,
   },
   counterRow: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
     marginBottom: 40,
   },
   circleButton: {
     width: 50,
     height: 50,
-    backgroundColor: '#E0E0E0', 
+    backgroundColor: "#E0E0E0",
     borderRadius: 25,
-    justifyContent: 'center',
-    alignItems: 'center',
+    justifyContent: "center",
+    alignItems: "center",
   },
   quantityBox: {
     width: 120,
     height: 50,
-    backgroundColor: '#E0E0E0',
+    backgroundColor: "#E0E0E0",
     borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
+    justifyContent: "center",
+    alignItems: "center",
     marginHorizontal: 16,
   },
-  quantityText: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#000',
-  },
-  subtitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    marginBottom: 16,
-  },
+  quantityText: { fontSize: 24, fontWeight: "bold", color: "#000" },
+  subtitle: { fontSize: 20, fontWeight: "bold", marginBottom: 16 },
   paymentOption: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     paddingVertical: 12,
-    paddingHorizontal: 12, 
+    paddingHorizontal: 12,
     borderRadius: 8,
     borderWidth: 2,
-    borderColor: 'transparent',
+    borderColor: "transparent",
     marginBottom: 8,
   },
-  paymentText: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    marginLeft: 12,
-  },
-  spacer: {
-    flex: 1,
-  },
+  paymentText: { fontSize: 20, fontWeight: "bold", marginLeft: 12 },
+  spacer: { flex: 1 },
   rechargeButton: {
     height: 56,
     borderRadius: 12,
-    justifyContent: 'center',
-    alignItems: 'center',
+    justifyContent: "center",
+    alignItems: "center",
   },
-  rechargeButtonText: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#FFF',
-  },
+  rechargeButtonText: { fontSize: 20, fontWeight: "bold", color: "#FFF" },
   modalBackground: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
+    backgroundColor: "rgba(0,0,0,0.5)",
+    justifyContent: "center",
+    alignItems: "center",
     padding: 24,
   },
   modalContainer: {
-    width: '100%',
-    backgroundColor: '#FFF',
+    width: "100%",
+    backgroundColor: "#FFF",
     borderRadius: 16,
     padding: 24,
   },
   modalTitle: {
     fontSize: 20,
-    fontWeight: 'bold',
-    textAlign: 'center',
+    fontWeight: "bold",
+    textAlign: "center",
     marginBottom: 24,
   },
   modalButtonFilled: {
     paddingVertical: 14,
     borderRadius: 8,
-    alignItems: 'center',
+    alignItems: "center",
     marginBottom: 12,
   },
-  modalButtonFilledText: {
-    color: '#FFF',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
+  modalButtonFilledText: { color: "#FFF", fontSize: 16, fontWeight: "bold" },
   modalButtonOutlined: {
     paddingVertical: 14,
     borderRadius: 8,
     borderWidth: 2,
-    alignItems: 'center',
+    alignItems: "center",
   },
-  modalButtonOutlinedText: {
-    fontSize: 16,
-    fontWeight: 'bold',
+  modalButtonOutlinedText: { fontSize: 16, fontWeight: "bold" },
+  modalCancelButton: { marginTop: 16, alignItems: "center" },
+  modalCancelText: { color: "#757575", fontSize: 16 },
+  pixCodeContainer: {
+    backgroundColor: "#F3F4F6",
+    padding: 16,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "#E5E7EB",
+    marginBottom: 24,
   },
-  modalCancelButton: {
-    marginTop: 16,
-    alignItems: 'center',
+  pixCodeText: {
+    color: "#6B7280",
+    fontSize: 14,
+    textAlign: "center",
   },
-  modalCancelText: {
-    color: '#757575',
-    fontSize: 16,
-  }
 });

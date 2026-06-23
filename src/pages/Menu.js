@@ -21,9 +21,7 @@ export default function MenuPrincipal({navigation}) {
 
       {/* Cabeçalho com Menu Hamburguer */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => console.log("Abrir Menu")}>
-          <Ionicons name="menu" size={35} color="white" />
-        </TouchableOpacity>
+       
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false}>
