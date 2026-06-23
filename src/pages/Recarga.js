@@ -9,6 +9,7 @@ import {
   Modal,
   ActivityIndicator,
   Clipboard,
+  Platform,
 } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 import { Feather, MaterialIcons } from "@expo/vector-icons";
@@ -33,6 +34,7 @@ Notifications.setNotificationHandler({
     shouldShowAlert: true, // Mostra o banner visual vindo de cima
     shouldPlaySound: true, // Toca o som de notificação padrão do celular
     shouldSetBadge: false,
+    priority: Notifications.AndroidNotificationPriority.HIGH, // Força prioridade alta para o APK nativo
   }),
 });
 
@@ -75,15 +77,27 @@ export default function Recarga() {
     verificarEstudante();
   }, []);
 
-  // 2. PEDIR PERMISSÃO AO USUÁRIO ASSIM QUE ENTRAR NA TELA (CORRIGIDO)
+  // 2. PEDIR PERMISSÃO E CONFIGURAR O CANAL DO ANDROID NATIVO (AJUSTADO PARA APK)
   useEffect(() => {
-    async function solicitarPermissaoNotificacao() {
+    async function configurarNotificacoes() {
+      // Solicita permissão do sistema
       const { status } = await Notifications.requestPermissionsAsync();
       if (status !== "granted") {
         console.log("Permissão para notificações locais não foi concedida.");
+        return;
+      }
+
+      // CRITICAL PARA APK: Cria o canal com prioridade máxima no sistema Android
+      if (Platform.OS === "android") {
+        await Notifications.setNotificationChannelAsync("recargas-channel", {
+          name: "Confirmações de Recarga",
+          importance: Notifications.AndroidNotificationImportance.MAX,
+          vibrationPattern: [0, 250, 250, 250],
+          lightColor: "#3B82F6",
+        });
       }
     }
-    solicitarPermissaoNotificacao(); // Corrigido o erro de digitação aqui
+    configurarNotificacoes();
   }, []);
 
   // Funções de controle do contador
@@ -97,15 +111,19 @@ export default function Recarga() {
   const totalFormatado = total.toFixed(2).replace(".", ",");
   const isCartaoSelecionado = formaPagamento.startsWith("Cartão");
 
-  // FUNÇÃO EXCLUSIVA PARA DISPARAR O BANNER DO TOPO (CORRIGIDO)
+  // FUNÇÃO EXCLUSIVA PARA DISPARAR O BANNER DO TOPO (VINCULADA AO CANAL)
   const dispararNotificacaoSucesso = async () => {
     try {
       await Notifications.scheduleNotificationAsync({
         content: {
           title: "Recarga Confirmada! 🚌✨",
           body: `Seu pagamento via ${formaPagamento} de R$ ${totalFormatado} foi validado. Suas passagens já estão disponíveis!`,
+          sound: true,
         },
-        trigger: { seconds: 1 }, // Corrigido: 'null' quebrava nas versões novas do Expo. 'seconds: 1' é seguro.
+        trigger: {
+          seconds: 1,
+          channelId: "recargas-channel", // Vincula explicitamente ao canal de alta importância criado
+        },
       });
     } catch (error) {
       console.log("Erro ao disparar notificação:", error);
@@ -113,7 +131,7 @@ export default function Recarga() {
   };
 
   // FUNÇÃO DE RECARGA NO BANCO DE DADOS
-  const executarRecargaNoFirebase = async () => {
+  const ejecutarRecargaNoFirebase = async () => {
     setIsCarregando(true);
 
     try {
@@ -134,7 +152,7 @@ export default function Recarga() {
         valorTotalFormatado: totalFormatado,
         pagamento: formaPagamento,
         data: new Date(),
-        tipoPassagemAplicada: valorPassagem === 2.35 ? "Meia" : "Inteira", // Registra no extrato se foi meia ou inteira!
+        tipoPassagemAplicada: valorPassagem === 2.35 ? "Meia" : "Inteira",
       });
 
       // Fecha o modal do PIX se estiver aberto
@@ -143,7 +161,7 @@ export default function Recarga() {
       // 1. Dispara a notificação local para cair do topo instantaneamente
       await dispararNotificacaoSucesso();
 
-      // 2. Retorna para a tela anterior direto, sem travar a interface do usuário
+      // 2. Retorna para a tela anterior direto
       navigation.goBack();
     } catch (error) {
       console.error("Erro crítico ao processar recarga:", error);
@@ -171,13 +189,11 @@ export default function Recarga() {
       return;
     }
 
-    // SE FOR PIX, ABRE O MODAL DO PIX ANTES DE SALVAR
     if (formaPagamento === "PIX") {
       setModalPixVisivel(true);
       return;
     }
 
-    // SE FOR CARTÃO, VALIDA NO BANCO ANTES DE SALVAR
     setIsCarregando(true);
     try {
       const userRef = doc(db, "usuarios", auth.currentUser.uid);
@@ -195,7 +211,6 @@ export default function Recarga() {
         }
       }
 
-      // Se passou na validação do cartão cadastrado, salva no Firebase e gera notificação
       await executarRecargaNoFirebase();
     } catch (error) {
       console.error(error);
@@ -223,7 +238,6 @@ export default function Recarga() {
           R$ {totalFormatado}
         </Text>
 
-        {/* Adicionado um texto para mostrar qual tarifa está sendo aplicada */}
         <Text
           style={[
             styles.tipoTarifaText,
@@ -235,7 +249,7 @@ export default function Recarga() {
             : "Tarifa Inteira (Vale Transporte)"}
         </Text>
 
-        {/* Componente Seletor de Quantidades (Stepper) */}
+        {/* Componente Seletor de Quantidades */}
         <View style={styles.counterRow}>
           <TouchableOpacity
             style={styles.circleButton}
@@ -262,7 +276,7 @@ export default function Recarga() {
           Forma de Pagamento
         </Text>
 
-        {/* Opção Conclusiva: Cartão */}
+        {/* Cartão */}
         <TouchableOpacity
           activeOpacity={0.7}
           onPress={() => setModalCartaoVisivel(true)}
@@ -285,7 +299,7 @@ export default function Recarga() {
           )}
         </TouchableOpacity>
 
-        {/* Opção Conclusiva: PIX */}
+        {/* PIX */}
         <TouchableOpacity
           activeOpacity={0.7}
           onPress={() => setFormaPagamento("PIX")}
@@ -310,7 +324,6 @@ export default function Recarga() {
 
         <View style={styles.spacer} />
 
-        {/* Gatilho Inicial da Ação */}
         <TouchableOpacity
           style={[
             styles.rechargeButton,
@@ -328,7 +341,7 @@ export default function Recarga() {
         </TouchableOpacity>
       </View>
 
-      {/* MODAL 1: Escolha do Cartão (Crédito/Débito) */}
+      {/* MODAL 1: Escolha do Cartão */}
       <Modal
         visible={modalCartaoVisivel}
         transparent={true}
@@ -377,7 +390,7 @@ export default function Recarga() {
         </View>
       </Modal>
 
-      {/* MODAL 2: TELA DO PIX PARA A BANCA */}
+      {/* MODAL 2: TELA DO PIX */}
       <Modal visible={modalPixVisivel} transparent={true} animationType="slide">
         <View style={styles.modalBackground}>
           <View style={styles.modalContainer}>
@@ -424,7 +437,6 @@ export default function Recarga() {
               </Text>
             </View>
 
-            {/* BOTÃO COPIAR CÓDIGO PIX (Dispara a recarga + notificação) */}
             <TouchableOpacity
               style={[
                 styles.modalButtonFilled,
@@ -435,11 +447,9 @@ export default function Recarga() {
                 },
               ]}
               onPress={async () => {
-                // Simula a cópia real para a área de transferência
                 Clipboard.setString(
                   "00020126580014br.gov.bcb.pix0136123e4567-e89b-12d3-a456-426655440000",
                 );
-                // Executa a operação que atualiza o banco e joga a notificação na tela
                 await executarRecargaNoFirebase();
               }}
               disabled={isCarregando}
