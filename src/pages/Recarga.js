@@ -31,10 +31,10 @@ import {
 // CONFIGURAÇÃO ESSENCIAL: Faz a notificação cair do topo (Heads-up) mesmo com o app aberto!
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
-    shouldShowAlert: true, // Mostra o banner visual vindo de cima
-    shouldPlaySound: true, // Toca o som de notificação padrão do celular
+    shouldShowAlert: true,
+    shouldPlaySound: true,
     shouldSetBadge: false,
-    priority: Notifications.AndroidNotificationPriority.HIGH, // Força prioridade alta para o APK nativo
+    priority: Notifications.AndroidNotificationPriority.HIGH,
   }),
 });
 
@@ -47,7 +47,7 @@ export default function Recarga() {
   const pixGreen = "#32BCAD";
 
   // Estados da tela
-  const [valorPassagem, setValorPassagem] = useState(4.65); // Inicia com o valor da inteira
+  const [valorPassagem, setValorPassagem] = useState(4.65);
   const [quantidade, setQuantidade] = useState(0);
   const [formaPagamento, setFormaPagamento] = useState("");
   const [modalCartaoVisivel, setModalCartaoVisivel] = useState(false);
@@ -64,7 +64,6 @@ export default function Recarga() {
 
           if (userSnap.exists()) {
             const dados = userSnap.data();
-            // Se tiver o benefício ativo, o valor cai para 2.35
             if (dados.isEstudante === true) {
               setValorPassagem(2.35);
             }
@@ -77,17 +76,15 @@ export default function Recarga() {
     verificarEstudante();
   }, []);
 
-  // 2. PEDIR PERMISSÃO E CONFIGURAR O CANAL DO ANDROID NATIVO (AJUSTADO PARA APK)
+  // 2. SOLICITAR PERMISSÃO E CRIAR CANAL DE NOTIFICAÇÃO
   useEffect(() => {
     async function configurarNotificacoes() {
-      // Solicita permissão do sistema
       const { status } = await Notifications.requestPermissionsAsync();
       if (status !== "granted") {
         console.log("Permissão para notificações locais não foi concedida.");
         return;
       }
 
-      // CRITICAL PARA APK: Cria o canal com prioridade máxima no sistema Android
       if (Platform.OS === "android") {
         await Notifications.setNotificationChannelAsync("recargas-channel", {
           name: "Confirmações de Recarga",
@@ -106,23 +103,24 @@ export default function Recarga() {
     if (quantidade > 0) setQuantidade(quantidade - 1);
   };
 
-  // Cálculos dinâmicos de valores usando o estado 'valorPassagem'
+  // Cálculos dinâmicos
   const total = quantidade * valorPassagem;
   const totalFormatado = total.toFixed(2).replace(".", ",");
   const isCartaoSelecionado = formaPagamento.startsWith("Cartão");
 
-  // FUNÇÃO EXCLUSIVA PARA DISPARAR O BANNER DO TOPO (VINCULADA AO CANAL)
-  const dispararNotificacaoSucesso = async () => {
+  // FUNÇÃO EXCLUSIVA PARA DISPARAR O BANNER DO TOPO
+  const dispararNotificacaoSucesso = async (tipoPagamento) => {
     try {
       await Notifications.scheduleNotificationAsync({
         content: {
           title: "Recarga Confirmada! 🚌✨",
-          body: `Seu pagamento via ${formaPagamento} de R$ ${totalFormatado} foi validado. Suas passagens já estão disponíveis!`,
+          body: `Seu pagamento via ${tipoPagamento} de R$ ${totalFormatado} foi validado. Suas passagens já estão disponíveis!`,
           sound: true,
         },
         trigger: {
+          type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
           seconds: 1,
-          channelId: "recargas-channel", // Vincula explicitamente ao canal de alta importância criado
+          channelId: "recargas-channel",
         },
       });
     } catch (error) {
@@ -131,7 +129,7 @@ export default function Recarga() {
   };
 
   // FUNÇÃO DE RECARGA NO BANCO DE DADOS
-  const ejecutarRecargaNoFirebase = async () => {
+  const executarRecargaNoFirebase = async (pagamentoAtual) => {
     setIsCarregando(true);
 
     try {
@@ -150,7 +148,7 @@ export default function Recarga() {
         quantidade: quantidade,
         valorTotal: total,
         valorTotalFormatado: totalFormatado,
-        pagamento: formaPagamento,
+        pagamento: pagamentoAtual,
         data: new Date(),
         tipoPassagemAplicada: valorPassagem === 2.35 ? "Meia" : "Inteira",
       });
@@ -158,8 +156,8 @@ export default function Recarga() {
       // Fecha o modal do PIX se estiver aberto
       setModalPixVisivel(false);
 
-      // 1. Dispara a notificação local para cair do topo instantaneamente
-      await dispararNotificacaoSucesso();
+      // 1. Dispara a notificação local passando a forma de pagamento correta
+      await dispararNotificacaoSucesso(pagamentoAtual);
 
       // 2. Retorna para a tela anterior direto
       navigation.goBack();
@@ -211,7 +209,7 @@ export default function Recarga() {
         }
       }
 
-      await executarRecargaNoFirebase();
+      await executarRecargaNoFirebase(formaPagamento);
     } catch (error) {
       console.error(error);
       setIsCarregando(false);
@@ -276,7 +274,7 @@ export default function Recarga() {
           Forma de Pagamento
         </Text>
 
-        {/* Cartão */}
+        {/* Opção Conclusiva: Cartão */}
         <TouchableOpacity
           activeOpacity={0.7}
           onPress={() => setModalCartaoVisivel(true)}
@@ -299,7 +297,7 @@ export default function Recarga() {
           )}
         </TouchableOpacity>
 
-        {/* PIX */}
+        {/* Opção Conclusiva: PIX */}
         <TouchableOpacity
           activeOpacity={0.7}
           onPress={() => setFormaPagamento("PIX")}
@@ -324,6 +322,7 @@ export default function Recarga() {
 
         <View style={styles.spacer} />
 
+        {/* Gatilho Inicial */}
         <TouchableOpacity
           style={[
             styles.rechargeButton,
@@ -437,6 +436,7 @@ export default function Recarga() {
               </Text>
             </View>
 
+            {/* BOTÃO CORRIGIDO: Copia o código, altera o estado, executa no Firebase e notifica */}
             <TouchableOpacity
               style={[
                 styles.modalButtonFilled,
@@ -450,7 +450,9 @@ export default function Recarga() {
                 Clipboard.setString(
                   "00020126580014br.gov.bcb.pix0136123e4567-e89b-12d3-a456-426655440000",
                 );
-                await executarRecargaNoFirebase();
+                // Garante que a string do histórico/notificação seja salva explicitamente como "PIX"
+                setFormaPagamento("PIX");
+                await executarRecargaNoFirebase("PIX");
               }}
               disabled={isCarregando}
             >

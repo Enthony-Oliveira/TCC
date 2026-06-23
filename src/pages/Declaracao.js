@@ -16,9 +16,9 @@ import { Feather, MaterialIcons } from "@expo/vector-icons";
 import * as DocumentPicker from "expo-document-picker";
 import * as Notifications from "expo-notifications";
 
-// AJUSTADO: Importado o 'auth' junto com o 'db'
+// AJUSTADO: Importado 'deleteDoc'
 import { db, auth } from "../firebaseConfig";
-import { doc, setDoc, getDoc } from "firebase/firestore";
+import { doc, setDoc, getDoc, deleteDoc } from "firebase/firestore";
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -33,6 +33,7 @@ export default function Declaracao() {
 
   const primaryDarkBlue = "#0F3271";
   const buttonBlue = "#3B82F6";
+  const dangerRed = "#E53935"; // Cor vermelha para o botão de excluir
 
   const [dataVencimento, setDataVencimento] = useState("");
   const [arquivoSelecionado, setArquivoSelecionado] = useState(null);
@@ -136,7 +137,6 @@ export default function Declaracao() {
     }
   };
 
-  // FUNÇÃO DE NOTIFICAÇÃO CORRIGIDA
   const agendarNotificacaoVencimento = async () => {
     try {
       const partes = dataVencimento.split("/");
@@ -147,11 +147,10 @@ export default function Declaracao() {
       let tituloNotificacao = "Atenção: Matrícula Próxima do Vencimento! ⏳";
       let corpoNotificacao = `Sua declaração de matrícula vence em breve (${dataVencimento}).`;
 
-      // Calcula 5 dias antes. Se essa data já passou, agenda para daqui a 10 segundos (bom para mostrar na banca do TCC)
       let dataNotificacao = new Date(ano, mes, dia - 5, 9, 0, 0);
 
       if (dataNotificacao <= new Date()) {
-        dataNotificacao = new Date(Date.now() + 10000); // 10 segundos a partir de agora
+        dataNotificacao = new Date(Date.now() + 10000);
       }
 
       await Notifications.scheduleNotificationAsync({
@@ -172,7 +171,7 @@ export default function Declaracao() {
     }
   };
 
-  // ENVIO PARA O FIRESTORE (SEM STORAGE)
+  // ENVIO PARA O FIRESTORE
   const enviarArquivo = async () => {
     if (
       dataVencimento.length < 10 ||
@@ -194,47 +193,97 @@ export default function Declaracao() {
     setIsUploading(true);
 
     try {
-      // Salva apenas os metadados do arquivo (Gratuito e resolve o TCC)
       const arquivoParaSalvar = {
         name: arquivoSelecionado.name,
         mimeType: arquivoSelecionado.mimeType || "",
         size: arquivoSelecionado.size || 0,
       };
 
-      // 1. Salva a declaração na coleção de declarações
       await setDoc(doc(db, "declaracoes", "minha_matricula"), {
         dataVencimento: dataVencimento,
         arquivo: arquivoParaSalvar,
         atualizadoEm: new Date().toISOString(),
       });
 
-      // 2. NOVO AJUSTE: Muda o perfil do usuário para estudante habilitando a meia-passagem
       const usuarioAtual = auth.currentUser;
       if (usuarioAtual) {
         await setDoc(
-          doc(db, "usuarios", usuarioAtual.uid), 
+          doc(db, "usuarios", usuarioAtual.uid),
           {
             isEstudante: true,
-            tipoPassagem: "meia"
-          }, 
-          { merge: true } // Evita apagar outros dados do usuário (ex: nome, email)
+            tipoPassagem: "meia",
+          },
+          { merge: true },
         );
-        console.log("Perfil de estudante ativado com sucesso para o UID:", usuarioAtual.uid);
-      } else {
-        console.log("Aviso: Nenhum usuário logado no Auth do Firebase.");
+        console.log(
+          "Perfil de estudante ativado com sucesso para o UID:",
+          usuarioAtual.uid,
+        );
       }
 
       await agendarNotificacaoVencimento();
 
-      Alert.alert("Sucesso", "Declaração salva com sucesso e benefício de estudante ativado!", [
-        { text: "OK" },
-      ]);
+      Alert.alert(
+        "Sucesso",
+        "Declaração salva com sucesso e benefício de estudante ativado!",
+        [{ text: "OK" }],
+      );
     } catch (error) {
       console.log("Erro ao salvar no Firebase:", error);
       Alert.alert("Erro", "Não foi possível salvar os dados.");
     } finally {
       setIsUploading(false);
     }
+  };
+
+  // NOVA FUNÇÃO: EXCLUIR DOCUMENTO E REVERTER PASSAGEM
+  const excluirDocumento = async () => {
+    Alert.alert(
+      "Excluir Declaração",
+      "Tem certeza que deseja excluir? Você perderá o benefício da meia-passagem e voltará a pagar o valor integral (R$ 4,35).",
+      [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Sim, excluir",
+          style: "destructive",
+          onPress: async () => {
+            setIsUploading(true);
+            try {
+              // 1. Apaga a declaração do Firebase
+              await deleteDoc(doc(db, "declaracoes", "minha_matricula"));
+
+              // 2. Retorna o usuário para passagem normal
+              const usuarioAtual = auth.currentUser;
+              if (usuarioAtual) {
+                await setDoc(
+                  doc(db, "usuarios", usuarioAtual.uid),
+                  {
+                    isEstudante: false,
+                    tipoPassagem: "inteira",
+                  },
+                  { merge: true },
+                );
+              }
+
+              // 3. Limpa a tela e cancela notificações programadas
+              setArquivoSelecionado(null);
+              setDataVencimento("");
+              await Notifications.cancelAllScheduledNotificationsAsync();
+
+              Alert.alert(
+                "Excluído",
+                "Sua declaração foi removida e sua tarifa voltou ao normal.",
+              );
+            } catch (error) {
+              console.log("Erro ao excluir:", error);
+              Alert.alert("Erro", "Não foi possível excluir o documento.");
+            } finally {
+              setIsUploading(false);
+            }
+          },
+        },
+      ],
+    );
   };
 
   const isPdf =
@@ -347,6 +396,34 @@ export default function Declaracao() {
             <Text style={styles.buttonText}>Salvar Dados</Text>
           )}
         </TouchableOpacity>
+
+        {/* BOTÃO DE EXCLUIR (Aparece apenas se houver documento selecionado/salvo) */}
+        {arquivoSelecionado && (
+          <TouchableOpacity
+            style={[
+              styles.buttonOutlined,
+              { borderColor: dangerRed, marginTop: 16 },
+            ]}
+            onPress={excluirDocumento}
+            disabled={isUploading}
+          >
+            {isUploading ? (
+              <ActivityIndicator size="small" color={dangerRed} />
+            ) : (
+              <View style={styles.deleteButtonContent}>
+                <Feather
+                  name="trash-2"
+                  size={20}
+                  color={dangerRed}
+                  style={{ marginRight: 8 }}
+                />
+                <Text style={[styles.buttonText, { color: dangerRed }]}>
+                  Excluir Documento
+                </Text>
+              </View>
+            )}
+          </TouchableOpacity>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -381,6 +458,18 @@ const styles = StyleSheet.create({
     height: 56,
     borderRadius: 12,
     justifyContent: "center",
+    alignItems: "center",
+  },
+  buttonOutlined: {
+    height: 56,
+    borderRadius: 12,
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 2,
+    backgroundColor: "transparent",
+  },
+  deleteButtonContent: {
+    flexDirection: "row",
     alignItems: "center",
   },
   buttonText: { fontSize: 18, fontWeight: "bold", color: "white" },
